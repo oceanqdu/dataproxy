@@ -106,6 +106,9 @@ class BazelBuild(build_ext):
         bazel_targets = ["//dataproxy_sdk/python/dataproxy:init"]
 
         bazel_flags.extend(["-c", "opt"])
+        bazel_flags.extend([
+            f"--@rules_python//python/config_settings:python_version={sys.version_info.major}.{sys.version_info.minor}"
+        ])
 
         if platform.machine() == "x86_64":
             bazel_flags.extend(["--config=avx"])
