@@ -75,7 +75,7 @@ class CSVFileWrite : public FileHelpWrite {
   void DoOpen(const std::string& file_name,
               const FileHelpWrite::Options& options) {
     options_ = arrow::csv::WriteOptions::Defaults();
-    options_.quoting_style = arrow::csv::QuotingStyle::None;
+    options_.quoting_style = arrow::csv::QuotingStyle::Needed;
     ASSIGN_ARROW_OR_THROW(out_stream_,
                           arrow::io::FileOutputStream::Open(file_name));
   }
