@@ -61,14 +61,29 @@ sdk_cc_test: ## Run sdk c++ tests.
 	bazel coverage //test:all -c opt --combined_report=lcov --output_filter=^//: \
 		--jobs $(BAZEL_MAX_JOBS) --instrumentation_filter=^// \
 		--repository_cache=$(BAZEL_REPO_CACHE) --nocache_test_results
+
 .PHONY: sdk_py_test
 sdk_py_test: ## Run sdk python tests.
 	cd dataproxy_sdk/python && \
 	bazel coverage //test:all -c opt --combined_report=lcov --output_filter=^//: \
 		--jobs $(BAZEL_MAX_JOBS) --instrumentation_filter=^// \
 		--repository_cache=$(BAZEL_REPO_CACHE) --nocache_test_results
+
+.PHONY: sdk_go_test
+sdk_go_test: ## Run sdk go tests.
+	cd dataproxy_sdk/go && \
+	rm -rf ./test-results && mkdir -p test-results && \
+	GOEXPERIMENT=nocoverageredesign go test \
+		$$(go list ./pkg/... | grep -Ev "crd|testing|test") \
+		--parallel 4 -gcflags="all=-N -l" \
+		-coverprofile=test-results/pkg.covprofile.out | tee test-results/pkg.output.txt
+	cd dataproxy_sdk/go && cat test-results/pkg.output.txt | go-junit-report > test-results/TEST-pkg.xml
+	echo "mode: set" > dataproxy_sdk/go/test-results/coverage.out && \
+		cat dataproxy_sdk/go/test-results/*.covprofile.out | grep -v mode: | sort -r | awk '{if($$1 != last) {print $0;last=$$1}}' >> dataproxy_sdk/go/test-results/coverage.out
+	cd dataproxy_sdk/go && cat test-results/coverage.out | gocover-cobertura > test-results/coverage.xml
+
 .PHONY: sdk_test
-sdk_test: sdk_cc_test sdk_py_test
+sdk_test: sdk_cc_test sdk_py_test sdk_go_test
 
 PYTHON_VERSION ?= $(shell python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 .PHONY: sdk_py_build
