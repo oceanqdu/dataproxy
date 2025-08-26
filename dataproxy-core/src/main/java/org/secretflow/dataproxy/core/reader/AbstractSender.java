@@ -81,8 +81,9 @@ public abstract class AbstractSender<T> implements Sender<T>, AutoCloseable {
                 ValueVectorUtility.ensureCapacity(root, takeRecordCount + 1);
                 this.toArrowVector(record, root, takeRecordCount);
                 takeRecordCount++;
-
-                if (takeRecordCount % 300_000 == 0) {
+                // 10w records, flush to arrow
+                // It can't be too big, and the off-heap memory is clipped
+                if (takeRecordCount % 100_000 == 0) {
                     break;
                 }
             }
@@ -158,7 +159,7 @@ public abstract class AbstractSender<T> implements Sender<T>, AutoCloseable {
      * Pre-application for arrow vector memory
      */
     private void preAllocate() {
-
+        root.clear();
         ValueVectorUtility.preAllocate(root, estimatedRecordCount);
 
         root.getFieldVectors().forEach(fieldVector -> {
@@ -168,6 +169,5 @@ public abstract class AbstractSender<T> implements Sender<T>, AutoCloseable {
                 baseVariableWidthVector.allocateNew(estimatedRecordCount * 32);
             }
         });
-        root.clear();
     }
 }

@@ -37,11 +37,13 @@ public class HiveFlightProducer extends AbstractDatabaseFlightProducer {
 
     @Override
     protected DatabaseRecordWriter initRecordWriter(DatabaseWriteConfig config) {
+
         return new DatabaseRecordWriter(config,
                 HiveUtil::initHive,
                 HiveUtil::buildCreateTableSql,
                 HiveUtil::buildMultiRowInsertSql,
-                HiveUtil::checkTableExists);
+                HiveUtil::checkTableExists
+        );
     }
 }
 

@@ -23,7 +23,6 @@ import org.secretflow.dataproxy.core.reader.AbstractReader;
 import org.secretflow.dataproxy.core.reader.Sender;
 
 import java.sql.ResultSet;
-import java.sql.SQLException;
 
 @Slf4j
 public class DatabaseRecordReader extends AbstractReader<TaskConfig, Record> {

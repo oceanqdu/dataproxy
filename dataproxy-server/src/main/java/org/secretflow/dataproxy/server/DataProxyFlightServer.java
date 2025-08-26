@@ -18,8 +18,6 @@ package org.secretflow.dataproxy.server;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.arrow.flight.FlightServer;
-import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.memory.RootAllocator;
 import org.secretflow.dataproxy.core.config.FlightServerConfig;
 import org.secretflow.dataproxy.core.spi.producer.DataProxyFlightProducer;
 import org.secretflow.dataproxy.server.flight.CompositeFlightProducer;
@@ -59,14 +57,12 @@ public class DataProxyFlightServer implements AutoCloseable {
     }
 
     private FlightServer init(FlightServerConfig config) {
-
-        BufferAllocator allocator = new RootAllocator();
-
+        log.info("DataProxyFlightServer init.");
         return FlightServer.builder()
 //                .useTls(null, null)
 //                .useMTlsClientVerification(null)
                 .middleware(FlightServerTraceMiddleware.getKey(), new FlightServerTraceMiddleware.FlightServerTraceMiddlewareFactory())
-                .allocator(allocator)
+                .allocator(config.getBufferAllocator())
                 .location(config.getLocation())
                 .producer(initProducer())
                 .build();

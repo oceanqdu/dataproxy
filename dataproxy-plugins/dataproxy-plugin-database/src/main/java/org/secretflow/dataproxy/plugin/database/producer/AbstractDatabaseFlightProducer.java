@@ -141,6 +141,7 @@ public abstract class AbstractDatabaseFlightProducer extends NoOpFlightProducer 
                     break;
                 }
             }
+            log.info("doGet is completed");
             listener.completed();
         } catch (InterruptedException | IOException e) {
             log.error("doGet error!", e);
@@ -167,6 +168,7 @@ public abstract class AbstractDatabaseFlightProducer extends NoOpFlightProducer 
     public Runnable acceptPut(
             CallContext context, FlightStream flightStream, StreamListener<PutResult> ackStream
     ) {
+        log.info("acceptPut hive write.");
         final Any any = GrpcUtils.parseOrThrow(flightStream.getDescriptor().getCommand());
 
         if(!"type.googleapis.com/kuscia.proto.api.v1alpha1.datamesh.TicketDomainDataQuery".equals(any.getTypeUrl())) {
@@ -200,6 +202,12 @@ public abstract class AbstractDatabaseFlightProducer extends NoOpFlightProducer 
                 log.info("put data over! all count: {}", count);
             } catch (InvalidProtocolBufferException e) {
                 throw CallStatus.INVALID_ARGUMENT
+                        .withCause(e)
+                        .withDescription(e.getMessage())
+                        .toRuntimeException();
+            } catch (Exception e) {
+                log.error("unknown error", e);
+                throw CallStatus.INTERNAL
                         .withCause(e)
                         .withDescription(e.getMessage())
                         .toRuntimeException();

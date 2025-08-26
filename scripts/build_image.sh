@@ -40,7 +40,7 @@ if [ "$BUILDER_EXISTS" -eq 0 ]; then
 	docker buildx use dataproxy_image_buildx
 else
 	echo "creating new buildx builder: dataproxy_image_buildx"
-	docker buildx create --name dataproxy_image_buildx --use
+	docker buildx create --name dataproxy_image_buildx --use --platform linux/arm64,linux/amd64
 fi
 
 if [[ "$github_flag" == "true" ]]; then

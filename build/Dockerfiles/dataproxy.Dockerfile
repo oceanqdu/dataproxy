@@ -23,7 +23,13 @@ RUN ln -s ${JAVA_HOME}/lib/libjli.so /lib64
 COPY dataproxy-server/target/dataproxy-server-0.0.1-SNAPSHOT.jar dataproxy.jar
 COPY libs/*.jar libs/
 
-ENV JAVA_OPTS="-server -XX:+UseG1GC -XX:+DisableExplicitGC -XX:InitiatingHeapOccupancyPercent=68 -Xlog:gc*=info:file=gc.log:time,tags:filecount=5,filesize=10M -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/app/log -XX:ErrorFile=/app/log/hs_err_pid%p.log"
+# At present, when the concurrency of the task is not high,
+# the heap memory consumption is not large, the maximum setting is 512M,
+# if the resources are sufficient, and the concurrency can be appropriately increased,
+# but the MaxDirectMemorySize needs to be increased according to the situation,
+# the current default setting is 1536m,
+# You can override this configuration by adding environment variables
+ENV JAVA_OPTS="-server -XX:+UseG1GC -XX:+UseContainerSupport -Xms256m -Xmx512m -XX:MaxDirectMemorySize=1536m -XX:+DisableExplicitGC -XX:InitiatingHeapOccupancyPercent=68 -Xlog:gc*=info:file=gc.log:time,tags:filecount=5,filesize=10M -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/app/log -XX:ErrorFile=/app/log/hs_err_pid%p.log"
 ENV LOG_LEVEL=INFO
 EXPOSE 8023
 ENTRYPOINT ${JAVA_HOME}/bin/java ${JAVA_OPTS} -Dsun.net.http.allowRestrictedHeaders=true --add-opens=java.base/java.nio=ALL-UNNAMED -jar ./dataproxy.jar

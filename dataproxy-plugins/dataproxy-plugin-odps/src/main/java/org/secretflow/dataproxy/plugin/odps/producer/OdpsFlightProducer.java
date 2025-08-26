@@ -69,6 +69,7 @@ import java.util.List;
 public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyFlightProducer {
 
     private final TicketService ticketService = CacheTicketService.getInstance();
+
     /**
      * Obtain the data type used for registration name and identification processing.
      *
@@ -119,7 +120,7 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
             }
 
             // Only the protocol is used, and the concrete schema is not returned here.
-            return new FlightInfo(DataProxyFlightProducer.DEFACT_SCHEMA, descriptor, endpointList, 0, 0,true, IpcOption.DEFAULT);
+            return new FlightInfo(DataProxyFlightProducer.DEFACT_SCHEMA, descriptor, endpointList, 0, 0, true, IpcOption.DEFAULT);
         } catch (InvalidProtocolBufferException e) {
             throw CallStatus.INVALID_ARGUMENT
                     .withCause(e)
@@ -136,8 +137,11 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
 
         ParamWrapper paramWrapper = ticketService.getParamWrapper(ticket.getBytes());
         ArrowReader odpsReader = null;
+        BufferAllocator allocator = null;
         try {
-
+            allocator =
+                    FlightServerContext.getInstance().getFlightServerConfig().getBufferAllocator()
+                            .newChildAllocator("odpsReader", 0, 2 * 128 * 1024 * 1024);
             Object param = paramWrapper.param();
 
             if (param == null) {
@@ -148,7 +152,7 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
                 if (OdpsTypeEnum.FILE.equals(odpsCommandConfig.getOdpsTypeEnum())) {
                     Object commandConfig = odpsCommandConfig.getCommandConfig();
                     if (commandConfig instanceof OdpsTableConfig odpsTableConfig) {
-                        odpsReader = new OdpsResourceReader(new RootAllocator(), odpsCommandConfig.getOdpsConnectConfig(), odpsTableConfig);
+                        odpsReader = new OdpsResourceReader(allocator, odpsCommandConfig.getOdpsConnectConfig(), odpsTableConfig);
                     } else {
                         throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "The odps read parameter is invalid, type url: " + commandConfig.getClass());
                     }
@@ -163,13 +167,14 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
                     odpsReader = new OdpsReader(new RootAllocator(), taskConfigs.get(0));
                 }
             } else if (param instanceof TaskConfig taskConfig) {
-                odpsReader = new OdpsReader(new RootAllocator(), taskConfig);
+                odpsReader = new OdpsReader(allocator, taskConfig);
             } else {
                 throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "The odps read parameter is invalid, type url: " + param.getClass());
             }
 
             listener.start(odpsReader.getVectorSchemaRoot());
             while (true) {
+                log.debug("Before put AllocatedMemory: {}", allocator.getAllocatedMemory());
                 if (context.isCancelled()) {
                     log.warn("reader is cancelled");
                     break;
@@ -177,6 +182,7 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
 
                 if (odpsReader.loadNextBatch()) {
                     listener.putNext();
+                    log.debug("After put AllocatedMemory: {}", allocator.getAllocatedMemory());
                 } else {
                     break;
                 }
@@ -191,8 +197,13 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
                     .toRuntimeException();
         } finally {
             try {
+                log.info("close odps reader");
+
                 if (odpsReader != null) {
                     odpsReader.close();
+                }
+                if (allocator != null) {
+                    allocator.close();
                 }
             } catch (Exception e) {
                 log.error("close odps reader error", e);
@@ -231,8 +242,8 @@ public class OdpsFlightProducer extends NoOpFlightProducer implements DataProxyF
                     askMsg = "row count: " + rowCount;
                     writer.write(vectorSchemaRoot);
 
-                    try(BufferAllocator ba = new RootAllocator(1024);
-                        final ArrowBuf buffer = ba.buffer(askMsg.getBytes(StandardCharsets.UTF_8).length)) {
+                    try (BufferAllocator ba = new RootAllocator(1024);
+                         final ArrowBuf buffer = ba.buffer(askMsg.getBytes(StandardCharsets.UTF_8).length)) {
                         ackStream.onNext(PutResult.metadata(buffer));
                     }
                     count += rowCount;

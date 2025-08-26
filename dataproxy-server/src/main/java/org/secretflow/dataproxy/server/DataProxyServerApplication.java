@@ -35,12 +35,22 @@ public class DataProxyServerApplication {
         try (DataProxyFlightServer dataProxyFlightServer = new DataProxyFlightServer(flightServerConfig)) {
             dataProxyFlightServer.start();
             log.info("Data proxy flight server start at {}:{}", flightServerConfig.getLocation().getUri().getHost(), flightServerConfig.port());
+
+            new Thread(() -> {
+                try {
+                    new DataProxyMetricsServer().start();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }, "mertics-thread").start();
+
             dataProxyFlightServer.awaitTermination();
         } catch (Exception e) {
             log.error("DataProxyFlightServer start failed", e);
             throw new RuntimeException(e);
         } finally {
             log.warn("DataProxyFlightServer stopped");
+            flightServerConfig.getBufferAllocator().close();
         }
     }
 }

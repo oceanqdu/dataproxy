@@ -241,9 +241,12 @@ public class CompositeFlightProducer implements FlightProducer {
                     yield CacheTicketService.getInstance().getParamWrapper(domaindataHandle.getBytes()).producerKey();
                 }
 
-                default -> throw CallStatus.INVALID_ARGUMENT
+                default -> {
+                    log.error("Unknown command type: {}", any.getTypeUrl());
+                    throw CallStatus.INVALID_ARGUMENT
                         .withDescription("Unknown command type")
                         .toRuntimeException();
+                }
             };
             log.info("producer type is {}", dataSourceType);
             return registry.getOrDefaultNoOp(dataSourceType);

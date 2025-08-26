@@ -61,5 +61,6 @@ public class DefaultFlightServerConfigLoader implements ConfigLoader {
             throw new RuntimeException(e);
         }
         properties.put(FlightServerConfigKey.PORT, 8023);
+        properties.put(FlightServerConfigKey.METRICS_PORT, 9101);
     }
 }

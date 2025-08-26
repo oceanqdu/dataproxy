@@ -18,6 +18,9 @@ package org.secretflow.dataproxy.core.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.arrow.flight.Location;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.secretflow.dataproxy.core.listener.DataProxyAllocationListener;
 
 /**
  * @author yuexie
@@ -26,7 +29,14 @@ import org.apache.arrow.flight.Location;
 @Slf4j
 public record FlightServerConfig(String host, int port) {
 
+    private static final BufferAllocator ROOT_ALLOCATOR =
+            new RootAllocator(new DataProxyAllocationListener(), 2L * 1024 * 1024 * 1024);
+
     public Location getLocation() {
         return Location.forGrpcInsecure(host, port);
+    }
+
+    public BufferAllocator getBufferAllocator() {
+        return ROOT_ALLOCATOR;
     }
 }

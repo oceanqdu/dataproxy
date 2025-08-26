@@ -26,4 +26,6 @@ public class FlightServerConfigKey {
 
     public static final String PORT = "SERVICE_PORT";
 
+    public static final String METRICS_PORT = "METRICS_PORT";
+
 }

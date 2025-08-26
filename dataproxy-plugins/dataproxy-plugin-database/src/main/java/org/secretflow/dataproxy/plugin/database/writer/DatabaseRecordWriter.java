@@ -45,6 +45,7 @@ public class DatabaseRecordWriter implements Writer {
     private final Function<DatabaseConnectConfig, Connection> initFunc;
     private final BiFunction<Connection, String, Boolean> checkTableExists;
     private final int BATCH_NUM = 500;
+
     @FunctionalInterface
     public interface BuildCreateTableSqlFunc {
         String apply(String tableName, Schema schema, Map<String, String> partitionSpec);
@@ -58,34 +59,18 @@ public class DatabaseRecordWriter implements Writer {
 
     @FunctionalInterface
     public interface BuildMultiInsertSqlFunc {
-        String apply(String tableName, Schema schema, List<Map<String,Object>> data, Map<String, String> partitionSpec);
+        SqlWithParams apply(String tableName, Schema schema, List<Map<String,Object>> data, Map<String, String> partitionSpec);
     }
     private BuildMultiInsertSqlFunc buildMultiInsertSql;
     private final Map<String, String> partitionSpec;
     private final String tableName;
     private Connection connection;
-    private final boolean supportMutliInsert;
+    private final boolean supportMultiInsert;
 
-    public static Map<String, String> PasrsePartition(String partition) {
-        Map<String, String> res = new LinkedHashMap<>();
-        String[] groups = partition.split("[,/]");
-        for (String group : groups) {
-            String[] kv = group.split("=");
-            if (kv.length != 2) {
-                throw new IllegalArgumentException("Invalid partition spec.");
-            }
-
-            String k = kv[0].trim();
-            String v = kv[1].trim()
-                    .replaceAll("'", "")
-                    .replaceAll("\"", "");
-            if (k.isEmpty() || v.isEmpty()) {
-                throw new IllegalArgumentException("Invalid partition spec.");
-            }
-
-            res.put(k, v);
-        }
-        return res;
+    // TODO: parse partition
+    // Partitioning is not supported in the current version
+    public static Map<String, String> parsePartition(String partition) {
+        return new LinkedHashMap<>();
     }
 
     public DatabaseRecordWriter(DatabaseWriteConfig commandConfig,
@@ -101,8 +86,8 @@ public class DatabaseRecordWriter implements Writer {
         this.buildCreateTableSql = buildCreateTableSql;
         this.buildInsertSql = buildInsertSql;
         this.tableName = this.dbTableConfig.tableName();
-        this.partitionSpec = PasrsePartition(this.dbTableConfig.partition());
-        supportMutliInsert = false;
+        this.partitionSpec = parsePartition(this.dbTableConfig.partition());
+        supportMultiInsert = false;
         this.prepare();
     }
 
@@ -119,8 +104,8 @@ public class DatabaseRecordWriter implements Writer {
         this.buildCreateTableSql = buildCreateTableSql;
         this.buildMultiInsertSql = buildMultiInsertSql;
         this.tableName = this.dbTableConfig.tableName();
-        this.partitionSpec = PasrsePartition(this.dbTableConfig.partition());
-        supportMutliInsert = true;
+        this.partitionSpec = parsePartition(this.dbTableConfig.partition());
+        supportMultiInsert = true;
         this.prepare();
     }
 
@@ -140,7 +125,7 @@ public class DatabaseRecordWriter implements Writer {
     }
 
     /**
-     * 获取字段数据
+     * Get field data
      *
      * @param fieldVector field vector
      * @param index       index
@@ -196,7 +181,7 @@ public class DatabaseRecordWriter implements Writer {
 
         String columnName;
 
-        if(supportMutliInsert) {
+        if(supportMultiInsert) {
             List<Map<String, Object>> multiRecords = new ArrayList<>();
             for(int rowIndex = 0; rowIndex < batchSize; rowIndex ++) {
                 Record record = new Record();
@@ -249,10 +234,18 @@ public class DatabaseRecordWriter implements Writer {
 
     }
 
-    private void dropTable() throws SQLException {
+    private void validateTableName(String tableName) {
         if (tableName == null || tableName.trim().isEmpty()) {
             throw new IllegalArgumentException("Table name cannot be null or empty");
         }
+        // Only allows letters, numbers, underscores, and must start with a letter
+        if (!tableName.matches("^[a-zA-Z][a-zA-Z0-9_]*$")) {
+            throw new IllegalArgumentException("Invalid table name format. Table name must start with a letter and contain only letters, numbers, and underscores");
+        }
+    }
+
+    private void dropTable() throws SQLException {
+        validateTableName(tableName);
 
         String sql = "DROP TABLE IF EXISTS " + tableName;
 
@@ -266,9 +259,7 @@ public class DatabaseRecordWriter implements Writer {
     }
 
     private void deleteAllRowOfTable() throws SQLException {
-        if (tableName == null || tableName.trim().isEmpty()) {
-            throw new IllegalArgumentException("Table name cannot be null or empty");
-        }
+        validateTableName(tableName);
 
         String sql = "DELETE FROM " + tableName;
 
@@ -292,11 +283,15 @@ public class DatabaseRecordWriter implements Writer {
     }
 
     public void insertMultiData(Schema arrowSchema, List<Map<String, Object>> multiData){
-        String sql = this.buildMultiInsertSql.apply(tableName, arrowSchema, multiData, partitionSpec);
-        try (PreparedStatement stmt = connection.prepareStatement(sql)){
-            stmt.executeUpdate();
+
+        SqlWithParams sp = this.buildMultiInsertSql.apply(tableName, arrowSchema, multiData, partitionSpec);
+        try (PreparedStatement ps = connection.prepareStatement(sp.sql);){
+            for (int i = 0; i < sp.params.size(); i++) {
+                ps.setObject(i + 1, sp.params.get(i));
+            }
+            ps.executeUpdate();
         } catch (SQLException e) {
-            log.error("insert data error: sql:\"{}\" error:\"{}\"", sql, e.getMessage());
+            log.error("insert data error: sql:\"{}\" error:\"{}\"", sp, e.getMessage());
             throw new RuntimeException(e);
         }
     }
@@ -321,6 +316,17 @@ public class DatabaseRecordWriter implements Writer {
             log.info("table {} no exists", tableName);
         }
         createTable(commandConfig.getResultSchema());
+    }
+
+    public static class SqlWithParams {
+
+        public final String sql;
+        public final List<Object> params;
+
+        public SqlWithParams(String sql, List<Object> params) {
+            this.sql = sql;
+            this.params = params;
+        }
     }
 
 }

@@ -28,17 +28,26 @@ import org.secretflow.dataproxy.common.exceptions.DataproxyException;
 import org.secretflow.dataproxy.plugin.database.config.DatabaseConnectConfig;
 import org.secretflow.dataproxy.plugin.database.writer.DatabaseRecordWriter;
 
-import java.sql.*;
-import java.util.*;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import static org.secretflow.dataproxy.plugin.database.writer.DatabaseRecordWriter.PasrsePartition;
+import static org.secretflow.dataproxy.plugin.database.writer.DatabaseRecordWriter.parsePartition;
 
 @Slf4j
 public class HiveUtil {
-    
+
     public static Connection initHive(DatabaseConnectConfig config) {
         String endpoint = config.endpoint();
         String ip;
@@ -53,13 +62,27 @@ public class HiveUtil {
         } else {
             ip = endpoint;
         }
+
+        // Validate IP address/hostname to prevent JDBC URL injection
+        if (ip == null || !ip.matches("^[a-zA-Z0-9._-]+$") || ip.contains("..") || ip.startsWith(".") || ip.endsWith(".")) {
+            throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE,
+                "Invalid IP address or hostname: " + ip);
+        }
+
+        // Validate database name to prevent JDBC URL injection
+        String database = config.database();
+        if (database == null || !database.matches("^[a-zA-Z0-9_]+$")) {
+            throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE,
+                "Invalid database name: " + database);
+        }
+
         Connection conn;
         try{
             // hive Authentication None
             if(!config.username().isEmpty() && !config.password().isEmpty()) {
-                conn = DriverManager.getConnection(String.format("jdbc:hive2://%s:%s/%s", ip, port, config.database()), config.username(), config.password());
+                conn = DriverManager.getConnection(String.format("jdbc:hive2://%s:%s/%s", ip, port, database), config.username(), config.password());
             } else {
-                conn = DriverManager.getConnection(String.format("jdbc:hive2://%s:%s/%s", ip, port, config.database()));
+                conn = DriverManager.getConnection(String.format("jdbc:hive2://%s:%s/%s", ip, port, database));
             }
         } catch (Exception e) {
             log.error("database init error \"{}\"", e.getMessage());
@@ -70,53 +93,100 @@ public class HiveUtil {
     }
 
     public static String buildQuerySql(String tableName, List<String> fields, String whereClause) {
-        final Pattern columnOrValuePattern = Pattern.compile("^[\\u00b7A-Za-z0-9\\u4e00-\\u9fa5\\-_,.]*$");
+        final Pattern columnOrValuePattern = Pattern.compile("^[a-zA-Z0-9_]+$");
 
+        // Validate table name
         if (!columnOrValuePattern.matcher(tableName).matches()) {
             throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid tableName:" + tableName);
         }
+
+        // Validate field names
+        for (String field : fields) {
+            if (!columnOrValuePattern.matcher(field).matches()) {
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid field name:" + field);
+            }
+        }
+
+        // Process where clause
+        String processedWhereClause = "";
         if (!whereClause.isEmpty()) {
             String[] groups = whereClause.split("[,/]");
             if (groups.length > 1) {
-                final Map<String, String> partitionSpec = PasrsePartition(whereClause);
+                final Map<String, String> partitionSpec = parsePartition(whereClause);
 
-                for (String key : partitionSpec.keySet()) {
+                for (Map.Entry<String, String> entry : partitionSpec.entrySet()) {
+                    String key = entry.getKey();
+                    String value = entry.getValue();
+
+                    // Validate partition key name
                     if (!columnOrValuePattern.matcher(key).matches()) {
                         throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid partition key:" + key);
                     }
-                    if (!columnOrValuePattern.matcher(partitionSpec.get(key)).matches()) {
-                        throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid partition value:" + partitionSpec.get(key));
+
+                    // Validate partition value - only allow letters, numbers, underscores, hyphens, and dots
+                    if (!value.matches("^[a-zA-Z0-9_.-]+$")) {
+                        throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid partition value:" + value);
                     }
                 }
 
-                List<String> list = partitionSpec.keySet().stream().map(k -> k + "='" + partitionSpec.get(k) + "'").toList();
-                whereClause = String.join(" and ", list);
+                List<String> list = partitionSpec.keySet().stream()
+                        .map(k -> k + "='" + escapeString(partitionSpec.get(k)) + "'")
+                        .toList();
+                processedWhereClause = String.join(" and ", list);
+            } else {
+                // For simple where conditions, use stricter validation or disallow
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE,
+                    "Invalid where clause format. Use partition format like 'key=value,key2=value2'");
             }
         }
-        String sql =  "select " + String.join(",", fields) + " from " + tableName + (whereClause.isEmpty() ? "" : " where " + whereClause);
+
+        String sql =  "select " + String.join(",", fields) + " from " + tableName +
+                      (processedWhereClause.isEmpty() ? "" : " where " + processedWhereClause);
         log.info("buildQuerySql sql:{}", sql);
         return sql;
     }
 
     public static String buildCreateTableSql(String tableName, Schema schema, Map<String, String> partition) {
+        final Pattern identifierPattern = Pattern.compile("^[a-zA-Z0-9_]+$");
+
+        // Validate table name
+        if (!identifierPattern.matcher(tableName).matches()) {
+            throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid tableName:" + tableName);
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE TABLE ").append(tableName).append(" (\n");
 
         List<Field> fields = schema.getFields();
-        Set<String> partitionKeys = partition.keySet(); // 分区字段名集合
+        Set<String> partitionKeys = partition.keySet(); // Partition field names collection
 
-        // 用于快速通过字段名查找 Field
+        // Used for quick field lookup by name
         Map<String, Field> fieldMap = new LinkedHashMap<>();
         for (Field field : fields) {
             fieldMap.put(field.getName(), field);
         }
 
-        // 表字段（不包含分区字段）
+        // Validate all field names
+        for (Field field : fields) {
+            String fieldName = field.getName();
+            if (!identifierPattern.matcher(fieldName).matches()) {
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid field name:" + fieldName);
+            }
+        }
+
+        // Validate partition key names
+        for (String partKey : partitionKeys) {
+            if (!identifierPattern.matcher(partKey).matches()) {
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid partition key:" + partKey);
+            }
+        }
+
+        // Table fields (excluding partition fields)
         boolean first = true;
         for (Field field : fields) {
             String fieldName = field.getName();
             if (partitionKeys.contains(fieldName)) {
-                continue; // 跳过分区字段
+                continue; // Skip partition fields
             }
 
             if (!first) {
@@ -129,14 +199,14 @@ public class HiveUtil {
         }
         sb.append("\n)");
 
-        // 分区字段（需要类型，但类型从 schema 中查）
+        // Partition fields (require types, types from schema)
         if (!partitionKeys.isEmpty()) {
             sb.append("\nPARTITIONED BY (\n");
             first = true;
             for (String partKey : partitionKeys) {
                 Field partitionField = fieldMap.get(partKey);
                 if (partitionField == null) {
-                    log.error("Partition column '" + partKey + "' not found in schema");
+                    log.error("Partition column '{}' not found in schema", partKey);
                     throw new IllegalArgumentException("Partition column '" + partKey + "' not found in schema");
                 }
 
@@ -155,115 +225,70 @@ public class HiveUtil {
         return sb.toString();
     }
 
-    public static String buildInsertSql(String tableName, Schema schema, Map<String, Object> data, Map<String, String> partition) {
-        List<Field> fields = schema.getFields();
-        Set<String> partitionKeys = partition.keySet();
+    public static DatabaseRecordWriter.SqlWithParams buildMultiRowInsertSql(String tableName,
+                                                                            Schema schema,
+                                                                            List<Map<String, Object>> dataList,
+                                                                            Map<String, String> partition
+    ) {
+        final Pattern identifierPattern = Pattern.compile("^[a-zA-Z0-9_]+$");
 
-        List<String> columns = new ArrayList<>();
-        List<String> values = new ArrayList<>();
-
-        // 遍历 schema 中的字段（以保持字段顺序）
-        for (Field field : fields) {
-            String fieldName = field.getName();
-
-            // 分区字段单独处理
-            if (partitionKeys.contains(fieldName)) {
-                continue;
-            }
-
-            columns.add(fieldName);
-            Object rawValue = data.get(fieldName);
-            ArrowType arrowType = field.getType();
-
-            values.add(formatValue(rawValue, arrowType));
-        }
-
-        // 构建 PARTITION 字段
-        List<String> partitionClauses = new ArrayList<>();
-        for (String partKey : partitionKeys) {
-            Object partVal = data.get(partKey); // 注意：从 data 中获取值更安全
-            Field field = fields.stream()
-                    .filter(f -> f.getName().equals(partKey))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("Partition key not found in schema: " + partKey));
-
-            String formatted = formatValue(partVal, field.getType());
-            partitionClauses.add(partKey + "=" + formatted);
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("INSERT INTO TABLE ").append(tableName);
-        if (!partitionClauses.isEmpty()) {
-            sb.append(" PARTITION (").append(String.join(", ", partitionClauses)).append(")");
-        }
-
-        sb.append(" (").append(String.join(", ", columns)).append(")");
-        sb.append(" VALUES (").append(String.join(", ", values)).append(")");
-        log.info("buildInsertSql sql: {}", sb);
-        return sb.toString();
-    }
-
-    public static String buildMultiRowInsertSql(String tableName, Schema schema, List<Map<String, Object>> dataList, Map<String, String> partition) {
         if (dataList == null || dataList.isEmpty()) {
             throw new IllegalArgumentException("No data to insert");
         }
 
-        Set<String> partitionKeys = partition.keySet();
-        List<Field> fields = schema.getFields();
-
-        // 取第一条数据判断 partition
-        Map<String, Object> firstRow = dataList.get(0);
-        List<String> partitionClauses = new ArrayList<>();
-        for (String partKey : partitionKeys) {
-            Object partVal = firstRow.get(partKey);
-            Field field = fields.stream()
-                    .filter(f -> f.getName().equals(partKey))
-                    .findFirst()
-                    .orElseThrow(() -> new IllegalArgumentException("Partition key not found in schema: " + partKey));
-            partitionClauses.add(partKey + "=" + formatValue(partVal, field.getType()));
+        if (!identifierPattern.matcher(tableName).matches()) {
+            throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid tableName:" + tableName);
+        }
+        for (Field f : schema.getFields()) {
+            if (!identifierPattern.matcher(f.getName()).matches()) {
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid field name:" + f.getName());
+            }
+        }
+        for (String k : partition.keySet()) {
+            if (!identifierPattern.matcher(k).matches()) {
+                throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid partition key:" + k);
+            }
         }
 
-        // 非 partition 字段
-        List<String> columns = fields.stream()
+        Set<String> partitionKeys = partition.keySet();
+        List<String> columns = schema.getFields().stream()
                 .map(Field::getName)
-                .filter(name -> !partitionKeys.contains(name))
+                .filter(n -> !partitionKeys.contains(n))
                 .collect(Collectors.toList());
 
         StringBuilder sb = new StringBuilder();
         sb.append("INSERT INTO TABLE ").append(tableName);
-        if (!partitionClauses.isEmpty()) {
-            sb.append(" PARTITION (").append(String.join(", ", partitionClauses)).append(")");
-        }
-        sb.append(" (").append(String.join(", ", columns)).append(")");
-        sb.append(" VALUES ");
 
-        List<String> rows = new ArrayList<>();
+        if (!partition.isEmpty()) {
+            List<String> partitionPlaceholders = partition.keySet()
+                    .stream()
+                    .map(k -> k + " = ?")
+                    .collect(Collectors.toList());
+            sb.append(" PARTITION (").append(String.join(", ", partitionPlaceholders)).append(")");
+        }
+
+        List<String> colPlaceholders = columns.stream()
+                .map(c -> "?")
+                .collect(Collectors.toList());
+        sb.append(" (").append(String.join(", ", columns)).append(") VALUES ");
+
+        String singleRow = "(" + String.join(", ", colPlaceholders) + ")";
+        List<String> allRows = Collections.nCopies(dataList.size(), singleRow);
+        sb.append(String.join(", ", allRows));
+
+        List<Object> params = new ArrayList<>();
+
+        for (String k : partition.keySet()) {
+            params.add(partition.get(k));
+        }
+
         for (Map<String, Object> row : dataList) {
-            List<String> vals = new ArrayList<>();
             for (String col : columns) {
-                Object val = row.get(col);
-                ArrowType type = schema.findField(col).getType();
-                vals.add(formatValue(val, type));
+                params.add(row.get(col));
             }
-            rows.add("(" + String.join(", ", vals) + ")");
         }
 
-        sb.append(String.join(",\n", rows));
-        return sb.toString();
-    }
-
-    private static String formatValue(Object value, ArrowType type) {
-        if (value == null) {
-            return "NULL";
-        }
-
-        return switch (type.getTypeID()) {
-            case Utf8, Binary, FixedSizeBinary -> "'" + escapeString(value.toString()) + "'";
-            case Int, FloatingPoint, Bool -> value.toString();
-            case Date, Timestamp, Time -> "'" + value + "'";
-            case Decimal -> value.toString();
-            default -> "'" + escapeString(value.toString()) + "'";
-        };
+        return new DatabaseRecordWriter.SqlWithParams(sb.toString(), params);
     }
 
     private static String escapeString(String str) {
@@ -277,7 +302,7 @@ public class HiveUtil {
 
         String type = jdbcType.trim().toLowerCase();
 
-        // 处理 decimal(p,s)
+        // Handle decimal(p,s)
         if (type.startsWith("decimal")) {
             Pattern pattern = Pattern.compile("decimal\\((\\d+),(\\d+)\\)");
             Matcher matcher = pattern.matcher(type);
@@ -286,7 +311,7 @@ public class HiveUtil {
                 int scale = Integer.parseInt(matcher.group(2));
                 return new ArrowType.Decimal(precision, scale, 128);
             } else {
-                return new ArrowType.Decimal(38, 10, 128); // 默认精度
+                return new ArrowType.Decimal(38, 10, 128); // Default precision
             }
         }
 
@@ -310,32 +335,22 @@ public class HiveUtil {
     public static String arrowTypeToJdbcType(ArrowType arrowType) {
         if (arrowType instanceof ArrowType.Utf8) {
             return "STRING";
-        } else if (arrowType instanceof ArrowType.Int) {
-            ArrowType.Int intType = (ArrowType.Int) arrowType;
+        } else if (arrowType instanceof ArrowType.Int intType) {
             int bitWidth = intType.getBitWidth();
             boolean signed = intType.getIsSigned();
-            switch (bitWidth) {
-                case 8:
-                    return signed ? "TINYINT" : "TINYINT UNSIGNED";
-                case 16:
-                    return signed ? "SMALLINT" : "SMALLINT UNSIGNED";
-                case 32:
-                    return signed ? "INT" : "INT UNSIGNED";
-                case 64:
-                    return signed ? "BIGINT" : "BIGINT UNSIGNED";
-                default:
-                    throw new IllegalArgumentException("Unsupported Int bitWidth: " + bitWidth);
-            }
-        } else if (arrowType instanceof ArrowType.FloatingPoint) {
-            ArrowType.FloatingPoint fp = (ArrowType.FloatingPoint) arrowType;
-            switch (fp.getPrecision()) {
-                case SINGLE:
-                    return "FLOAT";
-                case DOUBLE:
-                    return "DOUBLE";
-                default:
-                    throw new IllegalArgumentException("Unsupported floating point type");
-            }
+            return switch (bitWidth) {
+                case 8 -> signed ? "TINYINT" : "TINYINT UNSIGNED";
+                case 16 -> signed ? "SMALLINT" : "SMALLINT UNSIGNED";
+                case 32 -> signed ? "INT" : "INT UNSIGNED";
+                case 64 -> signed ? "BIGINT" : "BIGINT UNSIGNED";
+                default -> throw new IllegalArgumentException("Unsupported Int bitWidth: " + bitWidth);
+            };
+        } else if (arrowType instanceof ArrowType.FloatingPoint fp) {
+            return switch (fp.getPrecision()) {
+                case SINGLE -> "FLOAT";
+                case DOUBLE -> "DOUBLE";
+                default -> throw new IllegalArgumentException("Unsupported floating point type");
+            };
         } else if (arrowType instanceof ArrowType.Bool) {
             return "BOOLEAN";
         } else if (arrowType instanceof ArrowType.Date) {
@@ -344,8 +359,7 @@ public class HiveUtil {
             return "TIME";
         } else if (arrowType instanceof ArrowType.Timestamp) {
             return "TIMESTAMP";
-        } else if (arrowType instanceof ArrowType.Decimal) {
-            ArrowType.Decimal dec = (ArrowType.Decimal) arrowType;
+        } else if (arrowType instanceof ArrowType.Decimal dec) {
             return "DECIMAL(" + dec.getPrecision() + ", " + dec.getScale() + ")";
         } else if (arrowType instanceof ArrowType.Binary || arrowType instanceof ArrowType.FixedSizeBinary) {
             return "BINARY";
@@ -355,16 +369,20 @@ public class HiveUtil {
     }
 
     public static boolean checkTableExists(Connection connection, String tableName) {
+        final Pattern identifierPattern = Pattern.compile("^[a-zA-Z0-9_]+$");
+
+        // Validate table name
+        if (!identifierPattern.matcher(tableName).matches()) {
+            throw DataproxyException.of(DataproxyErrorCode.PARAMS_UNRELIABLE, "Invalid tableName:" + tableName);
+        }
+
         ResultSet rs = null;
-        PreparedStatement stmt = null;
+        Statement stmt = null;
         try {
-            stmt = connection.prepareStatement("SHOW TABLES ?");
-            stmt.setString(1, tableName);
-            rs = stmt.executeQuery();
-            boolean exists = rs.next();
-            rs.close();
-            stmt.close();
-            return exists;
+            // Hive doesn't support parameterized SHOW TABLES query, use string concatenation but validate table name first
+            stmt = connection.createStatement();
+            rs = stmt.executeQuery("SHOW TABLES LIKE '" + tableName + "'");
+            return rs.next();
         } catch (SQLException e) {
             log.error("check whether table has existed error: {}", e.getMessage());
             throw new RuntimeException(e);
@@ -377,10 +395,9 @@ public class HiveUtil {
                     stmt.close();
                 }
             } catch (SQLException e) {
-                log.error("close result or preparedStatement error: {}", e.getMessage());
+                log.error("close result or statement error: {}", e.getMessage());
             }
         }
     }
-
 
 }
